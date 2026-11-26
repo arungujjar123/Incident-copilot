@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop"]
+      interval: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 20
+
+  payments:
+    build: { context: ./services, args: { SERVICE: payments } }
+    environment: { SERVICE_NAME: payments, PORT: "8002" }
+    restart: unless-stopped
+    depends_on: { redis: { condition: service_healthy } }
+
+  orders:
+    build: { context: ./services, args: { SERVICE: orders } }
+    environment: { SERVICE_NAME: orders, PORT: "8001" }
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      payments: { condition: service_started }
+
+  gateway:
+    build: { context: ./services, args: { SERVICE: gateway } }
+    environment: { SERVICE_NAME: gateway, PORT: "8000" }
+    restart: unless-stopped
+    ports: ["8000:8000"]
+    depends_on: [orders]
+
+  loadgen:
+    build: { context: ./services, args: { SERVICE: loadgen } }
+    environment: { SERVICE_NAME: loadgen, REQUESTS_PER_SECOND: "5" }
+    restart: unless-stopped
+    depends_on: [gateway]
