@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+from opentelemetry import trace
 from datetime import datetime, timezone
 
 SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown")
@@ -18,6 +19,11 @@ class JsonFormatter(logging.Formatter):
             "level": record.levelname,
             "msg": record.getMessage(),
         }
+                # Attach the trace_id if this log happens inside a request
+        ctx = trace.get_current_span().get_span_context()
+        if ctx.is_valid:
+            log["trace_id"] = format(ctx.trace_id, "032x")
+            log["span_id"] = format(ctx.span_id, "016x")
         for key, value in vars(record).items():
             if key not in _RESERVED:
                 log[key] = value

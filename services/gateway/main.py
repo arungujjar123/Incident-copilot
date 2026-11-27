@@ -5,10 +5,14 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
 from common.logging_setup import get_logger
+from common.observability import DEPENDENCY_ERRORS, setup_observability
 
 log = get_logger()
 app = FastAPI(title="gateway")
+setup_observability(app)
 
 ORDERS_URL = os.getenv("ORDERS_URL", "http://orders:8001")
 TIMEOUT_S = float(os.getenv("DOWNSTREAM_TIMEOUT_S", "3"))
@@ -21,6 +25,9 @@ PRODUCTS = {
 }
 
 client = httpx.AsyncClient(timeout=TIMEOUT_S)
+# Creates a span for each outgoing call AND sends the trace_id to orders in the
+# "traceparent" HTTP header, so both services join the SAME trace (context propagation).
+HTTPXClientInstrumentor.instrument_client(client)
 
 
 class Item(BaseModel):
@@ -58,12 +65,19 @@ async def checkout(req: CheckoutRequest):
         )
         resp.raise_for_status()
     except httpx.TimeoutException:
+        DEPENDENCY_ERRORS.labels("orders", "timeout").inc()
+        ...
         log.error("orders service timed out", extra={"user_id": req.user_id, "timeout_s": TIMEOUT_S})
         raise HTTPException(504, "orders service timed out")
+    
     except httpx.HTTPStatusError as e:
         log.error("orders service returned error", extra={"user_id": req.user_id, "status_code": e.response.status_code})
         raise HTTPException(502, "orders service error")
+        DEPENDENCY_ERRORS.labels("orders", f"http_{e.response.status_code}").inc()
+        ...
     except httpx.RequestError as e:
+        DEPENDENCY_ERRORS.labels("orders", type(e).__name__).inc()
+        ...
         log.error("cannot reach orders service", extra={"user_id": req.user_id, "error_type": type(e).__name__})
         raise HTTPException(503, "orders service unreachable")
 

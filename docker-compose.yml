@@ -1,4 +1,11 @@
+# Request path: loadgen -> gateway -> orders -> (postgres, payments -> redis)
+# Observability: traces -> Jaeger | /metrics -> Prometheus | stdout -> Alloy -> Loki
+
+x-app-env: &app-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+
 services:
+  # ---------------- The shop ----------------
   postgres:
     image: postgres:16-alpine
     environment:
@@ -19,27 +26,78 @@ services:
 
   payments:
     build: { context: ./services, args: { SERVICE: payments } }
-    environment: { SERVICE_NAME: payments, PORT: "8002" }
+    environment:
+      <<: *app-env
+      SERVICE_NAME: payments
+      PORT: "8002"
     restart: unless-stopped
     depends_on: { redis: { condition: service_healthy } }
 
   orders:
     build: { context: ./services, args: { SERVICE: orders } }
-    environment: { SERVICE_NAME: orders, PORT: "8001" }
+    environment:
+      <<: *app-env
+      SERVICE_NAME: orders
+      PORT: "8001"
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
       payments: { condition: service_started }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 3s
+      retries: 20
 
   gateway:
     build: { context: ./services, args: { SERVICE: gateway } }
-    environment: { SERVICE_NAME: gateway, PORT: "8000" }
+    environment:
+      <<: *app-env
+      SERVICE_NAME: gateway
+      PORT: "8000"
     restart: unless-stopped
     ports: ["8000:8000"]
-    depends_on: [orders]
+    depends_on: { orders: { condition: service_healthy } }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 3s
+      retries: 20
 
   loadgen:
     build: { context: ./services, args: { SERVICE: loadgen } }
     environment: { SERVICE_NAME: loadgen, REQUESTS_PER_SECOND: "5" }
     restart: unless-stopped
-    depends_on: [gateway]
+    depends_on: { gateway: { condition: service_healthy } }
+
+  # ---------------- Observability ----------------
+  jaeger:
+    image: jaegertracing/jaeger:2.4.0
+    ports: ["16686:16686"]
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+
+  loki:
+    image: grafana/loki:3.3.2
+    ports: ["3100:3100"]
+
+  alloy:
+    image: grafana/alloy:v1.5.1
+    command: ["run", "--server.http.listen-addr=0.0.0.0:12345", "--storage.path=/var/lib/alloy/data", "/etc/alloy/config.alloy"]
+    volumes:
+      - ./observability/alloy.config:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on: [loki]
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./observability/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus, loki, jaeger]

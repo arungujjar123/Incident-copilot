@@ -7,8 +7,12 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
+from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
+from prometheus_client import Gauge
 
 from common.logging_setup import get_logger
+from common.observability import DEPENDENCY_ERRORS, setup_observability
 
 log = get_logger()
 
@@ -17,8 +21,20 @@ PAYMENTS_URL = os.getenv("PAYMENTS_URL", "http://payments:8002")
 POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
 POOL_TIMEOUT_S = float(os.getenv("DB_POOL_TIMEOUT_S", "2"))
 
+# Must run BEFORE the pool opens connections: every SQL query becomes a span.
+PsycopgInstrumentor().instrument()
+
 pool = AsyncConnectionPool(DATABASE_URL, min_size=1, max_size=POOL_SIZE, timeout=POOL_TIMEOUT_S, open=False)
 client = httpx.AsyncClient(timeout=float(os.getenv("DOWNSTREAM_TIMEOUT_S", "2")))
+
+HTTPXClientInstrumentor.instrument_client(client)
+
+# Connection-pool health. If "available" drops to 0 and "waiting" goes up,
+# the pool is exhausted: a classic root cause.
+Gauge("db_pool_max_connections", "Max connections in the pool").set(POOL_SIZE)
+Gauge("db_pool_open_connections", "Connections currently open").set_function(lambda: pool.get_stats().get("pool_size", 0))
+Gauge("db_pool_available_connections", "Idle connections ready to use").set_function(lambda: pool.get_stats().get("pool_available", 0))
+Gauge("db_pool_requests_waiting", "Requests waiting for a connection").set_function(lambda: pool.get_stats().get("requests_waiting", 0))
 
 
 @asynccontextmanager
@@ -40,6 +56,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="orders", lifespan=lifespan)
+
+setup_observability(app)
+
 
 
 class OrderRequest(BaseModel):
@@ -64,6 +83,7 @@ async def create_order(req: OrderRequest):
                 (req.user_id, req.amount, json.dumps(req.items)),
             )).fetchone()
     except Exception as e:
+        DEPENDENCY_ERRORS.labels("postgres", type(e).__name__).inc()
         log.error("database insert failed", extra={"user_id": req.user_id, "error_type": type(e).__name__, "detail": str(e)[:200]})
         raise HTTPException(500, "database error")
     order_id = row[0]
@@ -75,9 +95,11 @@ async def create_order(req: OrderRequest):
         resp.raise_for_status()
         status = resp.json()["status"]
     except httpx.TimeoutException:
+        DEPENDENCY_ERRORS.labels("payments", "timeout").inc()
         log.error("payments service timed out", extra={"order_id": order_id})
         status = "payment_timeout"
     except httpx.HTTPError as e:
+        DEPENDENCY_ERRORS.labels("payments", type(e).__name__).inc()
         log.error("payments call failed", extra={"order_id": order_id, "error_type": type(e).__name__})
         status = "payment_error"
 
@@ -86,6 +108,7 @@ async def create_order(req: OrderRequest):
         async with pool.connection() as conn:
             await conn.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
     except Exception as e:
+        DEPENDENCY_ERRORS.labels("postgres", type(e).__name__).inc()
         log.error("database update failed", extra={"order_id": order_id, "error_type": type(e).__name__})
         raise HTTPException(500, "database error")
 
