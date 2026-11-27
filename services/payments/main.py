@@ -19,6 +19,12 @@ r = redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), socket_timeou
 DECLINE_RATE = float(os.getenv("DECLINE_RATE", "0.03"))  # normal card declines, not errors
 
 
+# CHAOS HOOK (Step 3): extra delay added to every "bank" call.
+# Changed at runtime by the chaos script through POST /admin/chaos,
+# to simulate a slow external bank API without restarting anything.
+BANK_CHAOS = {"extra_latency_s": 0.0}
+
+
 class PayRequest(BaseModel):
     order_id: int
     amount: float
@@ -27,6 +33,16 @@ class PayRequest(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+class ChaosConfig(BaseModel):
+    extra_latency_s: float = 0.0
+
+
+@app.post("/admin/chaos", include_in_schema=False)
+async def set_chaos(cfg: ChaosConfig):
+    BANK_CHAOS["extra_latency_s"] = cfg.extra_latency_s
+    return BANK_CHAOS
+
 
 
 @app.post("/pay")
@@ -38,7 +54,7 @@ async def pay(req: PayRequest):
             log.warning("duplicate payment request", extra={"order_id": req.order_id})
             return {"order_id": req.order_id, "status": previous.decode()}
 
-        await asyncio.sleep(random.uniform(0.02, 0.08))  # pretend to call a bank
+        await asyncio.sleep(random.uniform(0.02, 0.08) + BANK_CHAOS["extra_latency_s"])  # pretend to call a bank
         status = "declined" if random.random() < DECLINE_RATE else "approved"
         await r.set(key, status, ex=3600)
     except redis.RedisError as e:

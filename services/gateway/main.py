@@ -29,6 +29,8 @@ client = httpx.AsyncClient(timeout=TIMEOUT_S)
 # "traceparent" HTTP header, so both services join the SAME trace (context propagation).
 HTTPXClientInstrumentor.instrument_client(client)
 
+# Real services log their config at startup. After a bad deploy, this line is a clue.
+log.info("gateway service started", extra={"orders_url": ORDERS_URL, "downstream_timeout_s": TIMEOUT_S})
 
 class Item(BaseModel):
     sku: str
@@ -66,21 +68,16 @@ async def checkout(req: CheckoutRequest):
         resp.raise_for_status()
     except httpx.TimeoutException:
         DEPENDENCY_ERRORS.labels("orders", "timeout").inc()
-        ...
         log.error("orders service timed out", extra={"user_id": req.user_id, "timeout_s": TIMEOUT_S})
         raise HTTPException(504, "orders service timed out")
-    
     except httpx.HTTPStatusError as e:
+        DEPENDENCY_ERRORS.labels("orders", f"http_{e.response.status_code}").inc()
         log.error("orders service returned error", extra={"user_id": req.user_id, "status_code": e.response.status_code})
         raise HTTPException(502, "orders service error")
-        DEPENDENCY_ERRORS.labels("orders", f"http_{e.response.status_code}").inc()
-        ...
     except httpx.RequestError as e:
         DEPENDENCY_ERRORS.labels("orders", type(e).__name__).inc()
-        ...
         log.error("cannot reach orders service", extra={"user_id": req.user_id, "error_type": type(e).__name__})
         raise HTTPException(503, "orders service unreachable")
-
     order = resp.json()
     log.info("checkout completed", extra={
         "user_id": req.user_id, "order_id": order["order_id"], "status": order["status"],

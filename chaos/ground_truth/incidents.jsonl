@@ -1,0 +1,1 @@
+{"incident_id": "inc-20261127-174149-postgres_down", "fault": "postgres_down", "root_cause_service": "postgres", "root_cause_category": "dependency_down", "root_cause_description": "The Postgres database container stopped. orders cannot save orders.", "injected_at": "2026-11-27T17:41:49Z", "recovered_at": "2026-11-27T17:42:07Z", "seconds_to_healthy_after_recovery": 45.2}

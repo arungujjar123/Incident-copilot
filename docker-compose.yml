@@ -39,6 +39,8 @@ services:
       <<: *app-env
       SERVICE_NAME: orders
       PORT: "8001"
+      # Normally the right URL. The chaos script can "deploy" a wrong one (bad_config_deploy).
+      PAYMENTS_URL: ${CHAOS_ORDERS_PAYMENTS_URL:-http://payments:8002}
     restart: unless-stopped
     depends_on:
       postgres: { condition: service_healthy }
@@ -54,6 +56,8 @@ services:
       <<: *app-env
       SERVICE_NAME: gateway
       PORT: "8000"
+      # Normally 3 seconds. The chaos script can "deploy" a tiny value (gateway_timeout_misconfig).
+      DOWNSTREAM_TIMEOUT_S: ${CHAOS_GATEWAY_TIMEOUT_S:-3}
     restart: unless-stopped
     ports: ["8000:8000"]
     depends_on: { orders: { condition: service_healthy } }

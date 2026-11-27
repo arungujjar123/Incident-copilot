@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
                 status     TEXT NOT NULL,
                 created_at TIMESTAMPTZ DEFAULT now()
             )""")
-    log.info("orders service started", extra={"db_pool_size": POOL_SIZE})
+        log.info("orders service started", extra={"db_pool_size": POOL_SIZE, "payments_url": PAYMENTS_URL})
     yield
     await pool.close()
 
@@ -108,7 +108,7 @@ async def create_order(req: OrderRequest):
         async with pool.connection() as conn:
             await conn.execute("UPDATE orders SET status = %s WHERE id = %s", (status, order_id))
     except Exception as e:
-        DEPENDENCY_ERRORS.labels("postgres", type(e).__name__).inc()
+        DEPENDENCY_ERRORS.labels("postgres", type(e).__name__).inc()                                            
         log.error("database update failed", extra={"order_id": order_id, "error_type": type(e).__name__})
         raise HTTPException(500, "database error")
 
